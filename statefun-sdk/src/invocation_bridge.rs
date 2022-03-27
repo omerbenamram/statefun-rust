@@ -16,11 +16,8 @@ pub trait InvocationBridge {
 }
 
 impl InvocationBridge for FunctionRegistry {
-    fn invoke_from_proto(
-        &self,
-        mut to_function: ToFunction,
-    ) -> Result<FromFunction, InvocationError> {
-        let mut batch_request = to_function.request;
+    fn invoke_from_proto(&self, to_function: ToFunction) -> Result<FromFunction, InvocationError> {
+        let batch_request = to_function.request;
 
         log::debug!(
             "FunctionRegistry: processing batch request {:#?}",
@@ -28,54 +25,62 @@ impl InvocationBridge for FunctionRegistry {
         );
 
         if let Some(r) = batch_request {
-            if let Request::Invocation(batch) = r {
-                let self_address = batch.target.expect("self_address to be not empty");
-                let persisted_values_proto = batch.state;
-                let mut persisted_values = parse_persisted_values(&persisted_values_proto);
+            match r {
+                Request::Invocation(batch) => {
+                    let self_address = batch.target.expect("self_address to be not empty");
+                    let persisted_values_proto = batch.state;
+                    let mut persisted_values = parse_persisted_values(&persisted_values_proto);
 
-                // we maintain a map of state updates that we update after every invocation. We maintain
-                // this to be able to send back coalesced state updates to the statefun runtime but we
-                // also need to update persisted_values so that subsequent invocations also "see" state
-                // updates
-                let mut coalesced_state_updates: HashMap<String, StateUpdate> = HashMap::new();
+                    // we maintain a map of state updates that we update after every invocation. We maintain
+                    // this to be able to send back coalesced state updates to the statefun runtime but we
+                    // also need to update persisted_values so that subsequent invocations also "see" state
+                    // updates
+                    let mut coalesced_state_updates: HashMap<String, StateUpdate> = HashMap::new();
+                    let mut batch_invocation_messages = vec![];
+                    let mut batch_delayed_invocation_messages = vec![];
+                    let mut batch_egress_messages = vec![];
 
-                for mut invocation in batch.invocations.into_iter() {
-                    let caller_address = invocation.caller.expect("Caller address to be not empty");
-                    let argument = invocation.argument.expect("Function to have argument");
-                    let context = Context::new(&persisted_values, &self_address, &caller_address);
+                    for invocation in batch.invocations.into_iter() {
+                        let caller_address =
+                            invocation.caller.expect("Caller address to be not empty");
+                        let argument = invocation.argument.expect("Function to have argument");
+                        let context =
+                            Context::new(&persisted_values, &self_address, &caller_address);
 
-                    let effects =
-                        self.invoke(context.self_address().function_type, context, argument)?;
+                        let effects =
+                            self.invoke(context.self_address().function_type, context, argument)?;
 
-                    let invocation_messages = invocation_messages(effects.invocations);
+                        batch_invocation_messages.extend(invocation_messages(effects.invocations));
 
-                    let delayed_invocation_messages =
-                        delayed_invocation_messages(effects.delayed_invocations);
+                        batch_delayed_invocation_messages
+                            .extend(delayed_invocation_messages(effects.delayed_invocations));
 
-                    let egress_messages = egress_messages(effects.egress_messages);
+                        batch_egress_messages.extend(egress_messages(effects.egress_messages));
 
-                    update_state(
-                        &mut persisted_values,
-                        &mut coalesced_state_updates,
-                        effects.state_updates,
-                    );
+                        update_state(
+                            &mut persisted_values,
+                            &mut coalesced_state_updates,
+                            effects.state_updates,
+                        );
+                    }
+
+                    let state_values = coalesced_state_updates.drain().map(|(_key, value)| value);
+                    let mut invocation_respose =
+                        statefun_proto::v2::from_function::InvocationResponse {
+                            state_mutations: vec![],
+                            outgoing_messages: batch_invocation_messages,
+                            delayed_invocations: batch_delayed_invocation_messages,
+                            outgoing_egresses: batch_egress_messages,
+                        };
+
+                    serialize_state_updates(&mut invocation_respose, state_values)?;
+
+                    return Ok(FromFunction {
+                        response: Some(from_function::Response::InvocationResult(
+                            invocation_respose,
+                        )),
+                    });
                 }
-
-                let state_values = coalesced_state_updates.drain().map(|(_key, value)| value);
-                serialize_state_updates(&mut invocation_respose, state_values)?;
-
-                let invocation_respose = statefun_proto::v2::from_function::InvocationResponse {
-                    state_mutations: todo!(),
-                    outgoing_messages: todo!(),
-                    delayed_invocations: todo!(),
-                    outgoing_egresses: todo!(),
-                };
-
-                return Ok(FromFunction {
-                    response: Some(from_function::Response::InvocationResult(
-                        invocation_respose,
-                    )),
-                });
             }
         }
 
@@ -91,8 +96,8 @@ fn parse_persisted_values(
 ) -> HashMap<String, Any> {
     let mut result = HashMap::new();
     for persisted_value in persisted_values {
-        let packed_state = deserialize_state(persisted_value.get_state_value());
-        result.insert(persisted_value.get_state_name().to_string(), packed_state);
+        let packed_state = deserialize_state(&persisted_value.state_value);
+        result.insert(persisted_value.state_name.to_string(), packed_state);
     }
     result
 }
@@ -211,7 +216,6 @@ mod tests {
 
     use crate::invocation_bridge::{deserialize_state, InvocationBridge};
     use crate::{Address, Effects, EgressIdentifier, FunctionRegistry, FunctionType};
-    use anyhow::anyhow;
 
     const FOO_STATE: &str = "foo";
     const BAR_STATE: &str = "bar";
@@ -250,32 +254,33 @@ mod tests {
 
         let to_function = complete_to_function();
 
-        let mut from_function = registry.invoke_from_proto(to_function)?;
+        let from_function: statefun_proto::v2::FromFunction =
+            registry.invoke_from_proto(to_function)?;
 
-        let mut invocation_respose = from_function.response.unwrap();
+        let invocation_respose = from_function.response.unwrap();
 
-        if let Response::InvocationResult(resp) = invocation_respose {
-            let mut outgoing = resp.outgoing_messages;
+        match invocation_respose {
+            Response::InvocationResult(resp) => {
+                let mut outgoing = resp.outgoing_messages;
 
-            assert_invocation(
-                outgoing.remove(0),
-                self_address(),
-                Value::string(MESSAGE1.to_string()),
-            );
-            assert_invocation(
-                outgoing.remove(0),
-                self_address(),
-                Value::string(MESSAGE2.to_string()),
-            );
-            assert_invocation(
-                outgoing.remove(0),
-                self_address(),
-                Value::string(MESSAGE3.to_string()),
-            );
+                assert_invocation(
+                    outgoing.remove(0),
+                    self_address(),
+                    Value::string(MESSAGE1.to_string()),
+                );
+                assert_invocation(
+                    outgoing.remove(0),
+                    self_address(),
+                    Value::string(MESSAGE2.to_string()),
+                );
+                assert_invocation(
+                    outgoing.remove(0),
+                    self_address(),
+                    Value::string(MESSAGE3.to_string()),
+                );
 
-            Ok(())
-        } else {
-            Err(anyhow!("Expected InvocationResult"))
+                Ok(())
+            }
         }
     }
 
@@ -287,38 +292,38 @@ mod tests {
         registry.register_fn(function_type(), |_context, message: Value| {
             let mut effects = Effects::new();
 
-            effects.send(self_address(), message.clone());
+            effects.send(self_address(), message);
 
             effects
         });
 
         let to_function = complete_to_function();
-        let mut from_function = registry.invoke_from_proto(to_function)?;
+        let from_function = registry.invoke_from_proto(to_function)?;
 
-        let mut invocation_respose = from_function.response.unwrap();
+        let invocation_respose = from_function.response.unwrap();
 
-        if let Response::InvocationResult(resp) = invocation_respose {
-            let mut outgoing = resp.outgoing_messages;
+        match invocation_respose {
+            Response::InvocationResult(resp) => {
+                let mut outgoing = resp.outgoing_messages;
 
-            assert_invocation(
-                outgoing.remove(0),
-                self_address(),
-                Value::string(MESSAGE1.to_string()),
-            );
-            assert_invocation(
-                outgoing.remove(0),
-                self_address(),
-                Value::string(MESSAGE2.to_string()),
-            );
-            assert_invocation(
-                outgoing.remove(0),
-                self_address(),
-                Value::string(MESSAGE3.to_string()),
-            );
+                assert_invocation(
+                    outgoing.remove(0),
+                    self_address(),
+                    Value::string(MESSAGE1.to_string()),
+                );
+                assert_invocation(
+                    outgoing.remove(0),
+                    self_address(),
+                    Value::string(MESSAGE2.to_string()),
+                );
+                assert_invocation(
+                    outgoing.remove(0),
+                    self_address(),
+                    Value::string(MESSAGE3.to_string()),
+                );
 
-            Ok(())
-        } else {
-            Err(anyhow!("Expected InvocationResult"))
+                Ok(())
+            }
         }
     }
 
@@ -329,40 +334,40 @@ mod tests {
         registry.register_fn(function_type(), |_context, message: Value| {
             let mut effects = Effects::new();
 
-            effects.send_after(caller_address(), Duration::from_secs(5), message.clone());
+            effects.send_after(caller_address(), Duration::from_secs(5), message);
 
             effects
         });
 
         let to_function = complete_to_function();
-        let mut from_function = registry.invoke_from_proto(to_function)?;
+        let from_function = registry.invoke_from_proto(to_function)?;
 
-        let mut invocation_respose = from_function.response.unwrap();
+        let invocation_respose = from_function.response.unwrap();
 
-        if let Response::InvocationResult(resp) = invocation_respose {
-            let mut delayed = resp.delayed_invocations;
+        match invocation_respose {
+            Response::InvocationResult(resp) => {
+                let mut delayed = resp.delayed_invocations;
 
-            assert_delayed_invocation(
-                delayed.remove(0),
-                caller_address(),
-                5000,
-                Value::string(MESSAGE1.to_string()),
-            );
-            assert_delayed_invocation(
-                delayed.remove(0),
-                caller_address(),
-                5000,
-                Value::string(MESSAGE2.to_string()),
-            );
-            assert_delayed_invocation(
-                delayed.remove(0),
-                caller_address(),
-                5000,
-                Value::string(MESSAGE3.to_string()),
-            );
-            Ok(())
-        } else {
-            Err(anyhow!("Expected InvocationResult"))
+                assert_delayed_invocation(
+                    delayed.remove(0),
+                    caller_address(),
+                    5000,
+                    Value::string(MESSAGE1.to_string()),
+                );
+                assert_delayed_invocation(
+                    delayed.remove(0),
+                    caller_address(),
+                    5000,
+                    Value::string(MESSAGE2.to_string()),
+                );
+                assert_delayed_invocation(
+                    delayed.remove(0),
+                    caller_address(),
+                    5000,
+                    Value::string(MESSAGE3.to_string()),
+                );
+                Ok(())
+            }
         }
     }
 
@@ -370,7 +375,7 @@ mod tests {
     #[test]
     fn forward_egresses_from_function() -> anyhow::Result<()> {
         let mut registry = FunctionRegistry::new();
-        registry.register_fn(function_type(), |_context, _message: String| {
+        registry.register_fn(function_type(), |_context, _message: Value| {
             let mut effects = Effects::new();
 
             effects.egress(
@@ -382,37 +387,37 @@ mod tests {
         });
 
         let to_function = complete_to_function();
-        let mut from_function = registry.invoke_from_proto(to_function)?;
+        let from_function = registry.invoke_from_proto(to_function)?;
 
-        let mut invocation_respose = from_function.response.unwrap();
-        if let Response::InvocationResult(resp) = invocation_respose {
-            let mut egresses = resp.outgoing_egresses;
+        match from_function.response.unwrap() {
+            Response::InvocationResult(resp) => {
+                let mut egresses = resp.outgoing_egresses;
 
-            assert_egress(
-                egresses.remove(0),
-                "namespace",
-                "name",
-                Value::string("egress".to_string()),
-            );
-            assert_egress(
-                egresses.remove(0),
-                "namespace",
-                "name",
-                Value::string("egress".to_string()),
-            );
-            assert_egress(
-                egresses.remove(0),
-                "namespace",
-                "name",
-                Value::string("egress".to_string()),
-            );
+                assert_egress(
+                    egresses.remove(0),
+                    "namespace",
+                    "name",
+                    Value::string("egress".to_string()),
+                );
+                assert_egress(
+                    egresses.remove(0),
+                    "namespace",
+                    "name",
+                    Value::string("egress".to_string()),
+                );
+                assert_egress(
+                    egresses.remove(0),
+                    "namespace",
+                    "name",
+                    Value::string("egress".to_string()),
+                );
 
-            Ok(())
-        } else {
-            Err(anyhow!("expected InvocationResponse"))
+                Ok(())
+            }
         }
     }
 
+    // TODO: fixme
     // Verifies that state mutations are correctly forwarded to the Protobuf FromFunction
     // #[test]
     // fn forward_state_mutations_from_function() -> anyhow::Result<()> {
@@ -461,7 +466,7 @@ mod tests {
     fn state_mutations_available_in_subsequent_invocations() -> anyhow::Result<()> {
         let mut registry = FunctionRegistry::new();
 
-        registry.register_fn(function_type(), |context, message: Value| {
+        registry.register_fn(function_type(), |context, _message: Value| {
             let state: Value = context.get_state(BAR_STATE).unwrap();
 
             let mut effects = Effects::new();
@@ -475,24 +480,24 @@ mod tests {
         });
 
         let to_function = complete_to_function();
-        let mut from_function = registry.invoke_from_proto(to_function)?;
+        let from_function = registry.invoke_from_proto(to_function)?;
 
-        let mut invocation_respose = from_function.response.unwrap();
-        if let Response::InvocationResult(resp) = invocation_respose {
-            let state_mutations = resp.state_mutations;
+        let invocation_respose = from_function.response.unwrap();
+        match invocation_respose {
+            Response::InvocationResult(resp) => {
+                let state_mutations = resp.state_mutations;
 
-            let state_map = to_state_map(state_mutations);
-            assert_eq!(state_map.len(), 2);
+                let state_map = to_state_map(state_mutations);
+                assert_eq!(state_map.len(), 2);
 
-            let bar_state = state_map.get(BAR_STATE).unwrap();
-            let foo_state = state_map.get(FOO_STATE).unwrap();
+                let bar_state = state_map.get(BAR_STATE).unwrap();
+                let foo_state = state_map.get(FOO_STATE).unwrap();
 
-            // state updates are coalesced
-            assert_state_update(bar_state, BAR_STATE, Value::number(3.0));
-            assert_state_delete(foo_state, FOO_STATE);
-            Ok(())
-        } else {
-            Err(anyhow!("FML"))
+                // state updates are coalesced
+                assert_state_update(bar_state, BAR_STATE, Value::number(3.0));
+                assert_state_delete(foo_state, FOO_STATE);
+                Ok(())
+            }
         }
     }
 
@@ -506,8 +511,8 @@ mod tests {
             expected_address
         );
         assert_eq!(
-            unpack_any::<Value>(&invocation.argument.unwrap()),
-            &expected_message
+            *unpack_any::<Value>(invocation.argument.unwrap()),
+            expected_message
         );
     }
 
@@ -523,8 +528,8 @@ mod tests {
         );
         assert_eq!(invocation.delay_in_ms, expected_delay);
         assert_eq!(
-            unpack_any::<Value>(&invocation.argument.unwrap()),
-            &expected_message
+            *unpack_any::<Value>(invocation.argument.unwrap()),
+            expected_message
         );
     }
 
@@ -537,8 +542,8 @@ mod tests {
         assert_eq!(egress.egress_namespace, expected_namespace);
         assert_eq!(egress.egress_type, expected_name);
         assert_eq!(
-            unpack_any::<Value>(&egress.argument.unwrap()),
-            &expected_message
+            *unpack_any::<Value>(egress.argument.unwrap()),
+            expected_message
         );
     }
 
@@ -600,12 +605,10 @@ mod tests {
     }
 
     fn states() -> Vec<to_function::PersistedValue> {
-        let mut states = vec![];
-
-        states.push(state(FOO_STATE.to_owned(), 0));
-        states.push(state(BAR_STATE.to_owned(), 0));
-
-        states
+        vec![
+            state(FOO_STATE.to_owned(), 0),
+            state(BAR_STATE.to_owned(), 0),
+        ]
     }
 
     fn state(name: String, value: i32) -> to_function::PersistedValue {
@@ -621,13 +624,11 @@ mod tests {
     /// It's important to create multiple invocations to test whether state updates can be "seen"
     /// by later invocations in a batch.
     fn invocations() -> Vec<to_function::Invocation> {
-        let mut invocations = Vec::new();
-
-        invocations.push(invocation(caller_address(), MESSAGE1));
-        invocations.push(invocation(caller_address(), MESSAGE2));
-        invocations.push(invocation(caller_address(), MESSAGE3));
-
-        invocations
+        vec![
+            invocation(caller_address(), MESSAGE1),
+            invocation(caller_address(), MESSAGE2),
+            invocation(caller_address(), MESSAGE3),
+        ]
     }
 
     fn invocation(caller: Address, argument: &str) -> to_function::Invocation {
@@ -640,10 +641,10 @@ mod tests {
         }
     }
 
-    fn unpack_any<M: Message + MessageSerde>(any: &Any) -> &M {
+    fn unpack_any<M: Message + MessageSerde>(any: Any) -> Box<M> {
         any.try_unpack()
             .unwrap()
-            .downcast_ref()
+            .downcast::<M>()
             .expect("Could not unwrap Result")
     }
 }

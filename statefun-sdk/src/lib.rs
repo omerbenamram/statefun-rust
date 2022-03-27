@@ -120,14 +120,10 @@ impl<'a> Context<'a> {
 
 /// Unpacks the given state, which is expected to be a serialized `Any<T>`.
 fn unpack_state<T: Message + Default>(state_name: &str, packed_state: &Any) -> Option<T> {
-    // let packed_state: Any =
-    //     protobuf::parse_from_bytes(serialized_state).expect("Could not deserialize state.");
-
     log::debug!("Packed state for {}: {:?}", state_name, packed_state);
+    let unpacked_state_value = packed_state.value.as_slice();
 
-    let unpacked_state_value = packed_state.value;
-
-    let unpacked_state: Option<T> = match <T as Message>::decode(&*unpacked_state_value) {
+    let unpacked_state: Option<T> = match <T as Message>::decode(unpacked_state_value) {
         Ok(msg) => Some(msg),
         Err(e) => None,
     };
@@ -172,7 +168,7 @@ impl Address {
     fn from_proto(proto_address: &ProtoAddress) -> Self {
         Address {
             function_type: FunctionType::new(&proto_address.namespace, &proto_address.r#type),
-            id: proto_address.id,
+            id: proto_address.id.clone(),
         }
     }
 

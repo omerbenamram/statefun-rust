@@ -78,8 +78,8 @@ async fn handle_request(
     let (_parts, body) = req.into_parts();
     log::debug!("Parts {:#?}", _parts);
 
-    let full_body = hyper::body::to_bytes(body).await?;
-    let to_function: ToFunction = prost::Message::decode(&mut full_body.reader())?;
+    let mut full_body = hyper::body::to_bytes(body).await?;
+    let to_function: ToFunction = prost::Message::decode(&mut full_body)?;
     let from_function = {
         let function_registry = function_registry.lock().unwrap();
         function_registry.invoke_from_proto(to_function)?
@@ -87,7 +87,7 @@ async fn handle_request(
 
     log::debug!("Response: {:#?}", from_function);
 
-    let encoded_result = from_function.write_to_bytes()?;
+    let encoded_result = prost::Message::encode_to_vec(&from_function);
 
     let response = Response::builder()
         .header("content-type", "application/octet-stream")
