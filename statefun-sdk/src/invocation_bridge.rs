@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use prost::Message;
 use prost_wkt_types::Any;
 use statefun_proto::v2::from_function::EgressMessage;
 use statefun_proto::v2::to_function::Request;
@@ -17,7 +18,7 @@ pub trait InvocationBridge {
 
 impl InvocationBridge for FunctionRegistry {
     fn invoke_from_proto(&self, to_function: ToFunction) -> Result<FromFunction, InvocationError> {
-        let batch_request = to_function.request;
+        let batch_request = dbg!(to_function.request);
 
         log::debug!(
             "FunctionRegistry: processing batch request {:#?}",
@@ -96,14 +97,12 @@ fn parse_persisted_values(
 ) -> HashMap<String, Any> {
     let mut result = HashMap::new();
     for persisted_value in persisted_values {
-        let packed_state = deserialize_state(&persisted_value.state_value);
-        result.insert(persisted_value.state_name.to_string(), packed_state);
+        let message = Any::decode(persisted_value.state_value.as_slice())
+            .expect("We always use Any for state");
+
+        result.insert(persisted_value.state_name.to_string(), message);
     }
     result
-}
-
-fn deserialize_state(serialized_state: &[u8]) -> Any {
-    prost::Message::decode(serialized_state).expect("Could not deserialize state.")
 }
 
 fn update_state(
@@ -214,7 +213,7 @@ mod tests {
     use statefun_proto::v2::to_function::Request;
     use statefun_proto::v2::{from_function, to_function, ToFunction};
 
-    use crate::invocation_bridge::{deserialize_state, InvocationBridge};
+    use crate::invocation_bridge::InvocationBridge;
     use crate::{Address, Effects, EgressIdentifier, FunctionRegistry, FunctionType};
 
     const FOO_STATE: &str = "foo";
@@ -223,6 +222,9 @@ mod tests {
     const MESSAGE2: &str = "fla";
     const MESSAGE3: &str = "flu";
 
+    fn deserialize_state(serialized_state: &[u8]) -> Any {
+        Any::decode(serialized_state).expect("Could not deserialize state.")
+    }
     // Verifies that all possible fields in a ToFunction are accessible in a function
     #[test]
     fn forward_to_function() -> anyhow::Result<()> {
@@ -617,7 +619,7 @@ mod tests {
 
         to_function::PersistedValue {
             state_name: name,
-            state_value: any_foo.value,
+            state_value: any_foo.encode_to_vec(),
         }
     }
 
