@@ -8,12 +8,12 @@
 //! # Examples
 //!
 //! ```
-//! use protobuf::well_known_types::StringValue;
+//! use prost_wkt_types::Value;
 //!
 //! use statefun::io::kafka::KafkaEgress;
 //! use statefun::{Address, Context, Effects, EgressIdentifier, FunctionRegistry, FunctionType};
 //!
-//! pub fn relay_to_kafka(_context: Context, message: StringValue) -> Effects {
+//! pub fn relay_to_kafka(_context: Context, message: Value) -> Effects {
 //!     let mut effects = Effects::new();
 //!
 //!     effects.kafka_keyed_egress(

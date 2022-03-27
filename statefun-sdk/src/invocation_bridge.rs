@@ -189,7 +189,7 @@ where
                     mutation_type: from_function::persisted_value_mutation::MutationType::Modify
                         .into(),
                     state_name: name,
-                    state_value: state.value,
+                    state_value: state.encode_to_vec(),
                 };
 
                 invocation_response.state_mutations.push(proto_state_update);

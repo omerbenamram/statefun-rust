@@ -7,7 +7,7 @@
 //! deployment.
 //!
 //! ```no_run
-//! use protobuf::well_known_types::StringValue;
+//! use prost_wkt_types::Value;
 //!
 //! use statefun::io::kafka;
 //! use statefun::transport::hyper::HyperHttpTransport;
@@ -18,7 +18,7 @@
 //!
 //! function_registry.register_fn(
 //!     FunctionType::new("example", "function1"),
-//!     |context, message: StringValue| {
+//!     |context, message: Value| {
 //!         let mut effects = Effects::new();
 //!
 //!         effects.send(
