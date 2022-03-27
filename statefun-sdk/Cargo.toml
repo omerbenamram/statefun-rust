@@ -1,7 +1,10 @@
 [package]
 name = "statefun"
 version = "0.1.1"
-authors = ["Aljoscha Krettek <aljoscha.krettek@gmail.com>"]
+authors = [
+    "Omer Ben-Amram <omerbenamram@gmail.com>",
+    "Aljoscha Krettek <aljoscha.krettek@gmail.com>",
+]
 readme = "../README.md"
 edition = "2018"
 license = "MIT"

@@ -109,7 +109,7 @@ impl<'a> Context<'a> {
 
     /// Returns the state (or persisted) value that previous invocations of this stateful function
     /// might have persisted under the given name.
-    pub fn get_state<T: Message + Default>(&self, name: &str) -> Option<T> {
+    pub fn get_state<T: Message + Default + MessageSerde>(&self, name: &str) -> Option<T> {
         let state = self.state.get(name);
         state.and_then(|serialized_state| {
             let unpacked_state: Option<T> = unpack_state(name, serialized_state);
