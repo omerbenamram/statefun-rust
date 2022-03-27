@@ -18,7 +18,7 @@ pub trait InvocationBridge {
 
 impl InvocationBridge for FunctionRegistry {
     fn invoke_from_proto(&self, to_function: ToFunction) -> Result<FromFunction, InvocationError> {
-        let batch_request = dbg!(to_function.request);
+        let batch_request = to_function.request;
 
         log::debug!(
             "FunctionRegistry: processing batch request {:#?}",
