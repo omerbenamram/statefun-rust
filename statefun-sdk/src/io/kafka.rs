@@ -26,10 +26,8 @@
 //!     effects
 //! }
 //! ```
-
-use protobuf::Message;
-
-use statefun_proto::kafka_egress::KafkaProducerRecord;
+use prost::Message;
+use statefun_proto::v2::KafkaProducerRecord;
 
 use crate::{Effects, EgressIdentifier};
 
@@ -54,7 +52,7 @@ pub trait KafkaEgress {
 
 impl KafkaEgress for Effects {
     fn kafka_egress<M: Message>(&mut self, identifier: EgressIdentifier, topic: &str, message: M) {
-        let kafka_record = egress_record(topic, message);
+        let kafka_record = egress_record(None, topic, message);
         self.egress(identifier, kafka_record);
     }
 
@@ -65,15 +63,15 @@ impl KafkaEgress for Effects {
         key: &str,
         message: M,
     ) {
-        let mut kafka_record = egress_record(topic, message);
-        kafka_record.set_key(key.to_owned());
+        let mut kafka_record = egress_record(Some(key), topic, message);
         self.egress(identifier, kafka_record);
     }
 }
 
-fn egress_record<M: Message>(topic: &str, value: M) -> KafkaProducerRecord {
-    let mut result = KafkaProducerRecord::new();
-    result.set_topic(topic.to_owned());
-    result.set_value_bytes(value.write_to_bytes().expect("Could not serialize value."));
-    result
+fn egress_record<M: Message>(key: Option<&str>, topic: &str, value: M) -> KafkaProducerRecord {
+    KafkaProducerRecord {
+        key: key.map(ToOwned::to_owned).unwrap_or_default(),
+        value_bytes: value.encode_to_vec(),
+        topic: topic.to_owned(),
+    }
 }

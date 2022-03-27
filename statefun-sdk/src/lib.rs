@@ -55,12 +55,13 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use protobuf::well_known_types::Any;
-use protobuf::Message;
-
 pub use error::InvocationError;
 pub use function_registry::FunctionRegistry;
-use statefun_proto::http_function::Address as ProtoAddress;
+use prost::Message;
+use prost_wkt::MessageSerde;
+use prost_wkt_types::Any;
+
+use statefun_proto::v2::Address as ProtoAddress;
 
 mod error;
 mod function_registry;
@@ -108,7 +109,7 @@ impl<'a> Context<'a> {
 
     /// Returns the state (or persisted) value that previous invocations of this stateful function
     /// might have persisted under the given name.
-    pub fn get_state<T: Message>(&self, name: &str) -> Option<T> {
+    pub fn get_state<T: Message + Default>(&self, name: &str) -> Option<T> {
         let state = self.state.get(name);
         state.and_then(|serialized_state| {
             let unpacked_state: Option<T> = unpack_state(name, serialized_state);
@@ -118,15 +119,18 @@ impl<'a> Context<'a> {
 }
 
 /// Unpacks the given state, which is expected to be a serialized `Any<T>`.
-fn unpack_state<T: Message>(state_name: &str, packed_state: &Any) -> Option<T> {
+fn unpack_state<T: Message + Default>(state_name: &str, packed_state: &Any) -> Option<T> {
     // let packed_state: Any =
     //     protobuf::parse_from_bytes(serialized_state).expect("Could not deserialize state.");
 
     log::debug!("Packed state for {}: {:?}", state_name, packed_state);
 
-    let unpacked_state: Option<T> = packed_state
-        .unpack()
-        .expect("Could not unpack state from Any.");
+    let unpacked_state_value = packed_state.value;
+
+    let unpacked_state: Option<T> = match <T as Message>::decode(&*unpacked_state_value) {
+        Ok(msg) => Some(msg),
+        Err(e) => None,
+    };
 
     unpacked_state
 }
@@ -167,22 +171,19 @@ impl Address {
     /// because we want to keep it out of the public API.
     fn from_proto(proto_address: &ProtoAddress) -> Self {
         Address {
-            function_type: FunctionType::new(
-                proto_address.get_namespace(),
-                proto_address.get_field_type(),
-            ),
-            id: proto_address.get_id().to_owned(),
+            function_type: FunctionType::new(&proto_address.namespace, &proto_address.r#type),
+            id: proto_address.id,
         }
     }
 
     /// Converts this `Address` into a Protobuf `Address`. We don't implement `From`/`Into` for this
     /// because we want to keep it out of the public API.
     fn into_proto(self) -> ProtoAddress {
-        let mut result = ProtoAddress::new();
-        result.set_namespace(self.function_type.namespace);
-        result.set_field_type(self.function_type.name);
-        result.set_id(self.id);
-        result
+        ProtoAddress {
+            namespace: self.function_type.namespace,
+            r#type: self.function_type.name,
+            id: self.id,
+        }
     }
 }
 
@@ -238,21 +239,30 @@ impl Effects {
     }
 
     /// Sends a message to the stateful function identified by the address.
-    pub fn send<M: Message>(&mut self, address: Address, message: M) {
-        let packed_message = Any::pack(&message).unwrap();
-        self.invocations.push((address, packed_message));
+    pub fn send<M: Message + MessageSerde + Default>(&mut self, address: Address, message: M) {
+        let packed = Any::try_pack(message).unwrap();
+        self.invocations.push((address, packed));
     }
 
     /// Sends a message to the stateful function identified by the address after a delay.
-    pub fn send_after<M: Message>(&mut self, address: Address, delay: Duration, message: M) {
-        let packed_message = Any::pack(&message).unwrap();
+    pub fn send_after<M: Message + MessageSerde + Default>(
+        &mut self,
+        address: Address,
+        delay: Duration,
+        message: M,
+    ) {
+        let packed_message = Any::try_pack(message).unwrap();
         self.delayed_invocations
             .push((address, delay, packed_message));
     }
 
     /// Sends a message to the egress identifier by the `EgressIdentifier`.
-    pub fn egress<M: Message>(&mut self, identifier: EgressIdentifier, message: M) {
-        let packed_message = Any::pack(&message).unwrap();
+    pub fn egress<M: Message + MessageSerde + Default>(
+        &mut self,
+        identifier: EgressIdentifier,
+        message: M,
+    ) {
+        let packed_message = Any::try_pack(message).unwrap();
         self.egress_messages.push((identifier, packed_message));
     }
 
@@ -263,10 +273,10 @@ impl Effects {
     }
 
     /// Updates the state stored under the given name to the given value.
-    pub fn update_state<T: Message>(&mut self, name: &str, value: &T) {
+    pub fn update_state<T: Message + MessageSerde + Default>(&mut self, name: &str, value: T) {
         self.state_updates.push(StateUpdate::Update(
             name.to_owned(),
-            Any::pack(value).expect("Could not pack state update."),
+            Any::try_pack(value).expect("Could not pack state update."),
         ));
     }
 }

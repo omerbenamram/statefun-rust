@@ -3,14 +3,11 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use bytes::buf::BufExt;
+use bytes::Buf;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{http, Body, Request, Response, Server};
-use protobuf::{Message, ProtobufError};
+use statefun_proto::v2::ToFunction;
 use thiserror::Error;
-use tokio::runtime;
-
-use statefun_proto::http_function::ToFunction;
 
 use crate::function_registry::FunctionRegistry;
 use crate::invocation_bridge::InvocationBridge;
@@ -41,10 +38,10 @@ impl Transport for HyperHttpTransport {
             self.bind_address
         );
 
-        let runtime = runtime::Builder::new()
-            .threaded_scheduler()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build();
+
         let mut runtime = match runtime {
             Ok(rt) => rt,
             Err(error) => return Err(TokioInitializationFailure(error)),
@@ -82,7 +79,7 @@ async fn handle_request(
     log::debug!("Parts {:#?}", _parts);
 
     let full_body = hyper::body::to_bytes(body).await?;
-    let to_function: ToFunction = protobuf::parse_from_reader(&mut full_body.reader())?;
+    let to_function: ToFunction = prost::Message::decode(&mut full_body.reader())?;
     let from_function = {
         let function_registry = function_registry.lock().unwrap();
         function_registry.invoke_from_proto(to_function)?
@@ -110,7 +107,7 @@ async fn handle_request(
 pub enum HyperTransportError {
     /// Something went wrong with Protobuf parsing, writing, packing, or unpacking.
     #[error(transparent)]
-    ProtobufError(#[from] ProtobufError),
+    ProtobufError(#[from] prost::DecodeError),
 
     /// An error occurred while invoking a user function.
     #[error(transparent)]
@@ -118,7 +115,7 @@ pub enum HyperTransportError {
 
     /// An error from the underlying hyper
     #[error(transparent)]
-    HyperError(#[from] hyper::error::Error),
+    HyperError(#[from] hyper::Error),
 
     /// An error from the underlying hyper/http.
     #[error(transparent)]

@@ -1,19 +1,11 @@
+use prost_wkt_build::*;
 use std::{
-    env, fs,
+    env,
     ops::Deref,
     path::{Path, PathBuf},
 };
 
-fn out_dir() -> PathBuf {
-    Path::new(&env::var("OUT_DIR").expect("env")).join("proto")
-}
-
-fn cleanup() {
-    let _ = fs::remove_dir_all(&out_dir());
-}
-
-#[allow(deprecated)]
-fn compile() {
+fn main() {
     let proto_dir = Path::new(&env::var("CARGO_MANIFEST_DIR").expect("env")).join("src");
 
     eprintln!("proto_dir={:?}", proto_dir);
@@ -27,40 +19,22 @@ fn compile() {
 
     eprintln!("protos: {:?}", slices);
 
-    let out_dir = out_dir();
-    fs::create_dir(&out_dir).expect("create_dir");
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let descriptor_file = out.join("descriptors.bin");
 
-    protoc_rust::run(protoc_rust::Args {
-        out_dir: &out_dir.to_string_lossy(),
-        input: &slices,
-        includes: &[&proto_dir.to_string_lossy()],
-        customize: protoc_rust::Customize {
-            ..Default::default()
-        },
-    })
-    .expect("protoc");
-}
+    let mut prost_build = prost_build::Config::new();
+    prost_build
+        .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .extern_path(".google.protobuf.Any", "::prost_wkt_types::Any")
+        .extern_path(".google.protobuf.Timestamp", "::prost_wkt_types::Timestamp")
+        .extern_path(".google.protobuf.Value", "::prost_wkt_types::Value")
+        .file_descriptor_set_path(&descriptor_file)
+        .compile_protos(&slices, &[proto_dir])
+        .expect("prost error");
 
-fn generate_mod_rs() {
-    let out_dir = out_dir();
+    let descriptor_bytes = std::fs::read(descriptor_file).unwrap();
 
-    let mods = glob::glob(&out_dir.join("*.rs").to_string_lossy())
-        .expect("glob")
-        .filter_map(|p| {
-            p.ok()
-                .map(|p| format!("pub mod {};", p.file_stem().unwrap().to_string_lossy()))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let descriptor = FileDescriptorSet::decode(&descriptor_bytes[..]).unwrap();
 
-    let mod_rs = out_dir.join("mod.rs");
-    fs::write(&mod_rs, format!("// @generated\n{}\n", mods)).expect("write");
-
-    println!("cargo:rustc-env=PROTO_MOD_RS={}", mod_rs.to_string_lossy());
-}
-
-fn main() {
-    cleanup();
-    compile();
-    generate_mod_rs();
+    prost_wkt_build::add_serde(out, descriptor);
 }

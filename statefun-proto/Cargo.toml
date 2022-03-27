@@ -1,7 +1,10 @@
 [package]
 name = "statefun-proto"
 version = "0.1.1"
-authors = ["Aljoscha Krettek <aljoscha.krettek@gmail.com>"]
+authors = [
+    "Omer Ben-Amram <omerbenamram@gmail.com>",
+    "Aljoscha Krettek <aljoscha.krettek@gmail.com>",
+]
 readme = "../README.md"
 edition = "2018"
 license = "MIT"
@@ -13,8 +16,12 @@ homepage = "https://github.com/aljoscha/statefun-rust"
 repository = "https://github.com/aljoscha/statefun-rust.git"
 
 [dependencies]
-protobuf = "2.15"
+prost = "0.9.0"
+prost-wkt = "0.3"
+prost-wkt-types = "0.3"
+serde = { version = "1.0", features = ["derive"] }
 
 [build-dependencies]
-protoc-rust = "2.15"
+prost-build = "0.9.0"
+prost-wkt-build = "0.3"
 glob = "0.3"

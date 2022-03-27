@@ -2,21 +2,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use protobuf::well_known_types::Any;
-use protobuf::{Message, ProtobufError};
-
-use statefun_proto::http_function::FromFunction;
-use statefun_proto::http_function::FromFunction_DelayedInvocation;
-use statefun_proto::http_function::FromFunction_EgressMessage;
-use statefun_proto::http_function::FromFunction_Invocation;
-use statefun_proto::http_function::FromFunction_InvocationResponse;
-use statefun_proto::http_function::FromFunction_PersistedValueMutation;
-use statefun_proto::http_function::FromFunction_PersistedValueMutation_MutationType;
-use statefun_proto::http_function::ToFunction;
-use statefun_proto::http_function::ToFunction_PersistedValue;
+use prost_wkt_types::Any;
+use statefun_proto::v2::from_function::EgressMessage;
+use statefun_proto::v2::to_function::Request;
+use statefun_proto::v2::{from_function, to_function, FromFunction, ToFunction};
 
 use crate::function_registry::FunctionRegistry;
-use crate::{Address, Context, EgressIdentifier, InvocationError, StateUpdate};
+use crate::{Address, Context, EgressIdentifier, FunctionType, InvocationError, StateUpdate};
 
 /// An invokable that takes protobuf `ToFunction` as argument and returns a protobuf `FromFunction`.
 pub trait InvocationBridge {
@@ -28,65 +20,85 @@ impl InvocationBridge for FunctionRegistry {
         &self,
         mut to_function: ToFunction,
     ) -> Result<FromFunction, InvocationError> {
-        let mut batch_request = to_function.take_invocation();
+        let mut batch_request = to_function.request;
+
         log::debug!(
             "FunctionRegistry: processing batch request {:#?}",
             batch_request
         );
 
-        let self_address = batch_request.take_target();
-        let persisted_values_proto = batch_request.take_state();
-        let mut persisted_values = parse_persisted_values(&persisted_values_proto);
+        if let Some(r) = batch_request {
+            if let Request::Invocation(batch) = r {
+                let self_address = batch.target.expect("self_address to be not empty");
+                let persisted_values_proto = batch.state;
+                let mut persisted_values = parse_persisted_values(&persisted_values_proto);
 
-        // we maintain a map of state updates that we update after every invocation. We maintain
-        // this to be able to send back coalesced state updates to the statefun runtime but we
-        // also need to update persisted_values so that subsequent invocations also "see" state
-        // updates
-        let mut coalesced_state_updates: HashMap<String, StateUpdate> = HashMap::new();
+                // we maintain a map of state updates that we update after every invocation. We maintain
+                // this to be able to send back coalesced state updates to the statefun runtime but we
+                // also need to update persisted_values so that subsequent invocations also "see" state
+                // updates
+                let mut coalesced_state_updates: HashMap<String, StateUpdate> = HashMap::new();
 
-        let mut invocation_respose = FromFunction_InvocationResponse::new();
+                for mut invocation in batch.invocations.into_iter() {
+                    let caller_address = invocation.caller.expect("Caller address to be not empty");
+                    let argument = invocation.argument.expect("Function to have argument");
+                    let context = Context::new(&persisted_values, &self_address, &caller_address);
 
-        for mut invocation in batch_request.take_invocations().into_iter() {
-            let caller_address = invocation.take_caller();
-            let argument = invocation.take_argument();
-            let context = Context::new(&persisted_values, &self_address, &caller_address);
+                    let effects =
+                        self.invoke(context.self_address().function_type, context, argument)?;
 
-            let effects = self.invoke(context.self_address().function_type, context, argument)?;
+                    let invocation_messages = invocation_messages(effects.invocations);
 
-            serialize_invocation_messages(&mut invocation_respose, effects.invocations);
-            serialize_delayed_invocation_messages(
-                &mut invocation_respose,
-                effects.delayed_invocations,
-            );
-            serialize_egress_messages(&mut invocation_respose, effects.egress_messages);
-            update_state(
-                &mut persisted_values,
-                &mut coalesced_state_updates,
-                effects.state_updates,
-            );
+                    let delayed_invocation_messages =
+                        delayed_invocation_messages(effects.delayed_invocations);
+
+                    let egress_messages = egress_messages(effects.egress_messages);
+
+                    update_state(
+                        &mut persisted_values,
+                        &mut coalesced_state_updates,
+                        effects.state_updates,
+                    );
+                }
+
+                let state_values = coalesced_state_updates.drain().map(|(_key, value)| value);
+                serialize_state_updates(&mut invocation_respose, state_values)?;
+
+                let invocation_respose = statefun_proto::v2::from_function::InvocationResponse {
+                    state_mutations: todo!(),
+                    outgoing_messages: todo!(),
+                    delayed_invocations: todo!(),
+                    outgoing_egresses: todo!(),
+                };
+
+                return Ok(FromFunction {
+                    response: Some(from_function::Response::InvocationResult(
+                        invocation_respose,
+                    )),
+                });
+            }
         }
 
-        let state_values = coalesced_state_updates.drain().map(|(_key, value)| value);
-        serialize_state_updates(&mut invocation_respose, state_values)?;
-
-        let mut from_function = FromFunction::new();
-        from_function.set_invocation_result(invocation_respose);
-
-        Ok(from_function)
+        // TODO: not sure what error returns here.
+        Err(InvocationError::FunctionNotFound(FunctionType::new(
+            "fml", "fml",
+        )))
     }
 }
 
-fn parse_persisted_values(persisted_values: &[ToFunction_PersistedValue]) -> HashMap<String, Any> {
+fn parse_persisted_values(
+    persisted_values: &[to_function::PersistedValue],
+) -> HashMap<String, Any> {
     let mut result = HashMap::new();
     for persisted_value in persisted_values {
-        let packed_state: Any = deserialize_state(persisted_value.get_state_value());
+        let packed_state = deserialize_state(persisted_value.get_state_value());
         result.insert(persisted_value.get_state_name().to_string(), packed_state);
     }
     result
 }
 
 fn deserialize_state(serialized_state: &[u8]) -> Any {
-    protobuf::parse_from_bytes(serialized_state).expect("Could not deserialize state.")
+    prost::Message::decode(serialized_state).expect("Could not deserialize state.")
 }
 
 fn update_state(
@@ -111,72 +123,68 @@ fn update_state(
     }
 }
 
-fn serialize_invocation_messages(
-    invocation_response: &mut FromFunction_InvocationResponse,
-    invocation_messages: Vec<(Address, Any)>,
-) {
-    for invocation_message in invocation_messages {
-        let mut proto_invocation_message = FromFunction_Invocation::new();
-        proto_invocation_message.set_target(invocation_message.0.into_proto());
-        proto_invocation_message.set_argument(invocation_message.1);
-        invocation_response
-            .outgoing_messages
-            .push(proto_invocation_message);
-    }
+// TODO: document these functions
+
+fn invocation_messages(invocation_messages: Vec<(Address, Any)>) -> Vec<from_function::Invocation> {
+    invocation_messages
+        .into_iter()
+        .map(|(target, argument)| from_function::Invocation {
+            target: Some(target.into_proto()),
+            argument: Some(argument),
+        })
+        .collect()
 }
 
-fn serialize_delayed_invocation_messages(
-    invocation_response: &mut FromFunction_InvocationResponse,
+fn delayed_invocation_messages(
     delayed_invocation_messages: Vec<(Address, Duration, Any)>,
-) {
-    for invocation_message in delayed_invocation_messages {
-        let mut proto_invocation_message = FromFunction_DelayedInvocation::new();
-        proto_invocation_message.set_target(invocation_message.0.into_proto());
-        proto_invocation_message.set_delay_in_ms(invocation_message.1.as_millis() as i64);
-        proto_invocation_message.set_argument(invocation_message.2);
-        invocation_response
-            .delayed_invocations
-            .push(proto_invocation_message);
-    }
+) -> Vec<from_function::DelayedInvocation> {
+    delayed_invocation_messages
+        .into_iter()
+        .map(
+            |(address, duration, argument)| from_function::DelayedInvocation {
+                delay_in_ms: duration.as_millis() as i64,
+                target: Some(address.into_proto()),
+                argument: Some(argument),
+            },
+        )
+        .collect()
 }
 
-fn serialize_egress_messages(
-    invocation_response: &mut FromFunction_InvocationResponse,
-    egress_messages: Vec<(EgressIdentifier, Any)>,
-) {
-    for egress_message in egress_messages {
-        let mut proto_egress_message = FromFunction_EgressMessage::new();
-        proto_egress_message.set_egress_namespace(egress_message.0.namespace);
-        proto_egress_message.set_egress_type(egress_message.0.name);
-        proto_egress_message.set_argument(egress_message.1);
-        invocation_response
-            .outgoing_egresses
-            .push(proto_egress_message);
-    }
+fn egress_messages(egress_messages: Vec<(EgressIdentifier, Any)>) -> Vec<EgressMessage> {
+    egress_messages
+        .into_iter()
+        .map(|(egress_identifier, argument)| EgressMessage {
+            egress_namespace: egress_identifier.namespace,
+            egress_type: egress_identifier.name,
+            argument: Some(argument),
+        })
+        .collect()
 }
 
 fn serialize_state_updates<T>(
-    invocation_response: &mut FromFunction_InvocationResponse,
+    invocation_response: &mut from_function::InvocationResponse,
     state_updates: T,
-) -> Result<(), ProtobufError>
+) -> Result<(), prost::DecodeError>
 where
     T: IntoIterator<Item = StateUpdate>,
 {
     for state_update in state_updates {
         match state_update {
             StateUpdate::Delete(name) => {
-                let mut proto_state_update = FromFunction_PersistedValueMutation::new();
+                let mut proto_state_update = from_function::PersistedValueMutation::new();
                 proto_state_update.set_state_name(name);
-                proto_state_update
-                    .set_mutation_type(FromFunction_PersistedValueMutation_MutationType::DELETE);
+                proto_state_update.set_mutation_type(
+                    from_function::persisted_value_mutation::MutationType::DELETE,
+                );
                 invocation_response.state_mutations.push(proto_state_update);
             }
             StateUpdate::Update(name, state) => {
-                let mut proto_state_update = FromFunction_PersistedValueMutation::new();
+                let mut proto_state_update = from_function::PersistedValueMutation::new();
                 proto_state_update.set_state_name(name);
                 proto_state_update.set_state_value(state.write_to_bytes()?);
-                proto_state_update
-                    .set_mutation_type(FromFunction_PersistedValueMutation_MutationType::MODIFY);
+                proto_state_update.set_mutation_type(
+                    from_function::persisted_value_mutation::MutationType::MODIFY,
+                );
                 invocation_response.state_mutations.push(proto_state_update);
             }
         }
@@ -186,18 +194,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use protobuf::well_known_types::{Int32Value, StringValue};
-    use protobuf::RepeatedField;
-
-    use statefun_proto::http_function::FromFunction_DelayedInvocation;
-    use statefun_proto::http_function::FromFunction_EgressMessage;
-    use statefun_proto::http_function::FromFunction_Invocation;
-    use statefun_proto::http_function::FromFunction_PersistedValueMutation;
-    use statefun_proto::http_function::FromFunction_PersistedValueMutation_MutationType;
-    use statefun_proto::http_function::ToFunction;
-    use statefun_proto::http_function::ToFunction_Invocation;
-    use statefun_proto::http_function::ToFunction_InvocationBatchRequest;
-    use statefun_proto::http_function::ToFunction_PersistedValue;
+    use prost_wkt_types::*;
+    use statefun_proto::v2::from_function;
 
     use crate::invocation_bridge::{deserialize_state, InvocationBridge};
     use crate::FunctionRegistry;
@@ -256,6 +254,7 @@ mod tests {
     #[test]
     fn forward_messages_from_function() -> anyhow::Result<()> {
         let mut registry = FunctionRegistry::new();
+
         registry.register_fn(function_type(), |_context, message: StringValue| {
             let mut effects = Effects::new();
 
@@ -364,6 +363,7 @@ mod tests {
     #[test]
     fn forward_state_mutations_from_function() -> anyhow::Result<()> {
         let mut registry = FunctionRegistry::new();
+
         registry.register_fn(function_type(), |_context, _message: StringValue| {
             let mut effects = Effects::new();
 
@@ -393,8 +393,8 @@ mod tests {
     }
 
     fn to_state_map(
-        state_mutations: RepeatedField<FromFunction_PersistedValueMutation>,
-    ) -> HashMap<String, FromFunction_PersistedValueMutation> {
+        state_mutations: RepeatedField<from_function::PersistedValueMutation>,
+    ) -> HashMap<String, from_function::PersistedValueMutation> {
         let mut state_mutations_map = HashMap::new();
         for state_mutation in state_mutations.into_iter() {
             state_mutations_map.insert(state_mutation.get_state_name().to_string(), state_mutation);
@@ -436,7 +436,7 @@ mod tests {
     }
 
     fn assert_invocation(
-        invocation: FromFunction_Invocation,
+        invocation: from_function::Invocation,
         expected_address: Address,
         expected_message: StringValue,
     ) {
@@ -451,7 +451,7 @@ mod tests {
     }
 
     fn assert_delayed_invocation(
-        invocation: FromFunction_DelayedInvocation,
+        invocation: from_function::DelayedInvocation,
         expected_address: Address,
         expected_delay: i64,
         expected_message: StringValue,
@@ -468,7 +468,7 @@ mod tests {
     }
 
     fn assert_egress(
-        egress: FromFunction_EgressMessage,
+        egress: from_function::EgressMessage,
         expected_namespace: &str,
         expected_name: &str,
         expected_message: StringValue,
@@ -482,13 +482,13 @@ mod tests {
     }
 
     fn assert_state_update<T: Message + PartialEq>(
-        state_mutation: &FromFunction_PersistedValueMutation,
+        state_mutation: &from_function::PersistedValueMutation,
         expected_name: &str,
         expected_value: T,
     ) {
         assert_eq!(
             state_mutation.get_mutation_type(),
-            FromFunction_PersistedValueMutation_MutationType::MODIFY
+            from_function::PersistedValueMutation_MutationType::MODIFY
         );
         assert_eq!(state_mutation.get_state_name(), expected_name);
         let packed_state: Any = deserialize_state(state_mutation.get_state_value());
@@ -497,12 +497,12 @@ mod tests {
     }
 
     fn assert_state_delete(
-        state_mutation: &FromFunction_PersistedValueMutation,
+        state_mutation: &from_function::PersistedValueMutation,
         expected_name: &str,
     ) {
         assert_eq!(
             state_mutation.get_mutation_type(),
-            FromFunction_PersistedValueMutation_MutationType::DELETE
+            from_function::PersistedValueMutation_MutationType::DELETE
         );
         assert_eq!(state_mutation.get_state_name(), expected_name);
     }
@@ -595,7 +595,7 @@ mod tests {
     }
 
     fn unpack_any<M: Message>(any: &Any) -> M {
-        any.unpack()
+        any.into()
             .expect("Could not unwrap Result")
             .expect("Could not unwrap Option.")
     }

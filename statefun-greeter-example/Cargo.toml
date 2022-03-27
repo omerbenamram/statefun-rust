@@ -15,14 +15,14 @@ repository = "https://github.com/aljoscha/statefun-rust.git"
 [dependencies]
 anyhow = "1.0"
 log = "0.4.8"
-env_logger = "0.7.1"
+env_logger = "0.9.0"
 statefun = { path = "../statefun-sdk", version = "0.1.1" }
 statefun-greeter-example-proto = { path = "../statefun-greeter-example-proto", version = "0.1.1" }
 protobuf = "2.15"
 
 # for reading/writing from/to Kafka in the data generator
-rdkafka = { version = "0.24", features = ["cmake-build"] }
-tokio = { version = "0.2", features = ["full"] }
+rdkafka = { version = "0.28.0", features = ["cmake-build"] }
+tokio = { version = "1", features = ["full"] }
 structopt = "0.3.5"
-rand = "0.7"
+rand = "0.8.5"
 futures = "0.3"

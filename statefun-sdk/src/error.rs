@@ -1,4 +1,3 @@
-use protobuf::ProtobufError;
 use thiserror::Error;
 
 use crate::FunctionType;
@@ -15,5 +14,5 @@ pub enum InvocationError {
 
     /// Something went wrong with Protobuf parsing, writing, packing, or unpacking.
     #[error(transparent)]
-    ProtobufError(#[from] ProtobufError),
+    ProtobufError(#[from] prost::DecodeError),
 }
