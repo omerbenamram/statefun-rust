@@ -125,7 +125,7 @@ fn unpack_state<T: Message + Default>(state_name: &str, packed_state: &Any) -> O
 
     let unpacked_state: Option<T> = match <T as Message>::decode(unpacked_state_value) {
         Ok(msg) => Some(msg),
-        Err(e) => None,
+        Err(_) => None,
     };
 
     unpacked_state

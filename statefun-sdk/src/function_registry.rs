@@ -81,26 +81,29 @@ impl<I: Message + MessageSerde, F: Fn(Context, I) -> Effects> InvokableFunction
 
 #[cfg(test)]
 mod tests {
+    use prost_wkt_types::value::Kind;
     use prost_wkt_types::Value;
 
     use crate::FunctionRegistry;
     use crate::*;
 
-    // #[test]
-    // fn call_registered_function() -> anyhow::Result<()> {
-    //     let state = HashMap::new();
-    //     let address = address_foo().into_proto();
-    //     let context = Context::new(&state, &address, &address);
+    #[test]
+    fn call_registered_function() -> anyhow::Result<()> {
+        let state = HashMap::new();
+        let address = address_foo().into_proto();
+        let context = Context::new(&state, &address, &address);
 
-    //     let mut registry = FunctionRegistry::new();
-    //     registry.register_fn(function_type_foo(), |_context, _message: Value| {
-    //         Effects::new()
-    //     });
+        let mut registry = FunctionRegistry::new();
+        registry.register_fn(function_type_foo(), |_context, _message: Value| {
+            Effects::new()
+        });
 
-    //     let _effects = registry.invoke(function_type_foo(), context, packed_argument)?;
+        let value = Value::string(String::new());
+        let _effects =
+            registry.invoke(function_type_foo(), context, Any::try_pack(value).unwrap())?;
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     #[test]
     fn call_unknown_function() -> anyhow::Result<()> {
@@ -118,61 +121,60 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn call_correct_function() -> anyhow::Result<()> {
-    //     let state = HashMap::new();
+    #[test]
+    fn call_correct_function() -> anyhow::Result<()> {
+        let state = HashMap::new();
 
-    //     let mut registry = FunctionRegistry::new();
-    //     registry.register_fn(function_type_foo(), |context, _message: Value| {
-    //         let mut effects = Effects::new();
+        let mut registry = FunctionRegistry::new();
+        registry.register_fn(function_type_foo(), |context, _message: Value| {
+            let mut effects = Effects::new();
 
-    //         let mut message = Value::string(String::new());
-    //         message.set_value("function_foo".to_owned());
-    //         effects.send(context.self_address(), message);
+            let message = Value::string("function_foo".to_owned());
+            effects.send(context.self_address(), message);
 
-    //         effects
-    //     });
+            effects
+        });
 
-    //     registry.register_fn(function_type_bar(), |context, _message: Value| {
-    //         let mut effects = Effects::new();
+        registry.register_fn(function_type_bar(), |context, _message: Value| {
+            let mut effects = Effects::new();
 
-    //         let mut message = Value::string(String::new());
-    //         message.set_value("function_bar".to_owned());
-    //         effects.send(context.self_address(), message);
+            let message = Value::string("function_bar".to_owned());
+            effects.send(context.self_address(), message);
 
-    //         effects
-    //     });
+            effects
+        });
 
-    //     let address_foo = address_foo().into_proto();
-    //     let context = Context::new(&state, &address_foo, &address_foo);
-    //     let packed_argument = Any::pack(&Value::new())?;
-    //     let effects_foo = registry.invoke(function_type_foo(), context, packed_argument)?;
-    //     assert_eq!(
-    //         effects_foo.invocations[0]
-    //             .1
-    //             .unpack::<Value>()
-    //             .unwrap()
-    //             .unwrap()
-    //             .get_value(),
-    //         "function_foo",
-    //     );
+        let address_foo = address_foo().into_proto();
+        let context = Context::new(&state, &address_foo, &address_foo);
+        let packed_argument = Any::try_pack(Value::string(String::new()))?;
+        let effects_foo = registry.invoke(function_type_foo(), context, packed_argument)?;
 
-    //     let address_bar = address_bar().into_proto();
-    //     let context = Context::new(&state, &address_bar, &address_bar);
-    //     let packed_argument = Any::pack(&Value::new())?;
-    //     let effects_bar = registry.invoke(function_type_bar(), context, packed_argument)?;
-    //     assert_eq!(
-    //         effects_bar.invocations[0]
-    //             .1
-    //             .unpack::<Value>()
-    //             .unwrap()
-    //             .unwrap()
-    //             .get_value(),
-    //         "function_bar",
-    //     );
+        let function_foo = effects_foo.invocations[0].1.clone().try_unpack().unwrap();
+        let function_foo_kind = function_foo.downcast::<Value>().unwrap().kind.unwrap();
+        let s = if let Kind::StringValue(s) = function_foo_kind {
+            s
+        } else {
+            panic!("expected string")
+        };
 
-    //     Ok(())
-    // }
+        assert_eq!(s, "function_foo".to_string(),);
+
+        let address_bar = address_bar().into_proto();
+        let context = Context::new(&state, &address_bar, &address_bar);
+        let packed_argument = Any::try_pack(Value::string(String::new()))?;
+        let effects_bar = registry.invoke(function_type_bar(), context, packed_argument)?;
+        let function_bar = effects_bar.invocations[0].1.clone().try_unpack().unwrap();
+        let function_bar_kind = function_bar.downcast::<Value>().unwrap().kind.unwrap();
+        let s = if let Kind::StringValue(s) = function_bar_kind {
+            s
+        } else {
+            panic!("expected string")
+        };
+
+        assert_eq!(s, "function_bar".to_string(),);
+
+        Ok(())
+    }
 
     fn function_type_foo() -> FunctionType {
         FunctionType::new("namespace", "foo")

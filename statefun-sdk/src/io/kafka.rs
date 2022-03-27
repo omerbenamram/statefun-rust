@@ -63,7 +63,7 @@ impl KafkaEgress for Effects {
         key: &str,
         message: M,
     ) {
-        let mut kafka_record = egress_record(Some(key), topic, message);
+        let kafka_record: KafkaProducerRecord = egress_record(Some(key), topic, message);
         self.egress(identifier, kafka_record);
     }
 }

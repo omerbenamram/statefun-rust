@@ -3,7 +3,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use bytes::Buf;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{http, Body, Request, Response, Server};
 use statefun_proto::v2::ToFunction;
@@ -42,7 +41,7 @@ impl Transport for HyperHttpTransport {
             .enable_all()
             .build();
 
-        let mut runtime = match runtime {
+        let runtime = match runtime {
             Ok(rt) => rt,
             Err(error) => return Err(TokioInitializationFailure(error)),
         };
